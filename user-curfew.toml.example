@@ -1,0 +1,31 @@
+# user-curfew configuration
+#
+# Each [[user]] block defines a lock schedule for a system account.
+#   name        = the linux username to lock/unlock
+#   lock_time   = HH:MM when the account gets locked (24h format)
+#   unlock_time = HH:MM when the account gets unlocked (24h format)
+#   days        = optional list of weekday names (mon, tue, wed, thu, fri, sat, sun)
+#                 defaults to every day if omitted
+#   kill        = force-disconnect active sessions at lock time (default: true)
+#   notify      = send desktop warnings before lock (default: follows [notifications].enabled)
+#
+# The lock window wraps across midnight, so lock=23:00 unlock=05:00 works
+# as expected (locked from 11 PM until 5 AM).
+#
+# [notifications] sends desktop warnings via notify-send before locking.
+#   enabled  = enable/disable all notifications (default: false)
+#   warnings = number of warnings to send before lock time (default: 3)
+#   interval = minutes between warnings (default: 5)
+
+[notifications]
+# enabled  = true
+# warnings = 3
+# interval = 5
+
+[[user]]
+name        = "example_user"
+lock_time   = "23:00"
+unlock_time = "05:00"
+# days      = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+# kill      = true
+# notify    = true

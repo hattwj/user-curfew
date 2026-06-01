@@ -1,0 +1,533 @@
+#!/usr/bin/env python3
+"""user-curfew: lock/unlock user accounts on a time schedule.
+
+Intended to run as root via cron every few minutes.
+Configuration lives in a TOML file next to this script.
+
+Usage:
+    user-curfew                  # enforce schedules from config
+    user-curfew --config PATH    # use a specific config file
+    user-curfew --install [MIN]  # add root crontab entry (default: every 5 min)
+    user-curfew --dry-run        # show what would happen without changing anything
+    user-curfew --status         # show current lock state of configured users
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import logging
+import os
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+LOG_FORMAT = "%(asctime)s  %(levelname)-8s  %(message)s"
+log = logging.getLogger("user-curfew")
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+VALID_DAYS = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
+DAY_MAP = {
+    0: "mon",
+    1: "tue",
+    2: "wed",
+    3: "thu",
+    4: "fri",
+    5: "sat",
+    6: "sun",
+}
+
+DEFAULT_NOTIFICATIONS = {
+    "enabled": False,
+    "warnings": 3,
+    "interval": 5,
+}
+
+
+def default_config_path() -> Path:
+    return Path(__file__).resolve().parent / "user-curfew.toml"
+
+
+def parse_time(value: str) -> datetime.time:
+    """Parse 'HH:MM' into a datetime.time."""
+    try:
+        parts = value.strip().split(":")
+        return datetime.time(int(parts[0]), int(parts[1]))
+    except (ValueError, IndexError):
+        raise ValueError(f"invalid time format {value!r}, expected HH:MM")
+
+
+def load_config(path: Path) -> dict:
+    """Load and validate the TOML config.
+
+    Returns {"users": [...], "notifications": {...}}.
+    """
+    if not path.exists():
+        log.error("config not found: %s", path)
+        sys.exit(1)
+
+    with open(path, "rb") as f:
+        raw = tomllib.load(f)
+
+    users = raw.get("user")
+    if not users:
+        log.warning("no [[user]] entries in %s", path)
+
+    raw_notif = raw.get("notifications", {})
+    notifications = {
+        "enabled": raw_notif.get("enabled", DEFAULT_NOTIFICATIONS["enabled"]),
+        "warnings": raw_notif.get("warnings", DEFAULT_NOTIFICATIONS["warnings"]),
+        "interval": raw_notif.get("interval", DEFAULT_NOTIFICATIONS["interval"]),
+    }
+
+    entries = []
+    if users:
+        for i, u in enumerate(users):
+            name = u.get("name")
+            if not name:
+                log.error("[[user]] entry %d missing 'name'", i)
+                sys.exit(1)
+
+            try:
+                lock_time = parse_time(u["lock_time"])
+                unlock_time = parse_time(u["unlock_time"])
+            except (KeyError, ValueError) as exc:
+                log.error("[[user]] %s: %s", name, exc)
+                sys.exit(1)
+
+            days = u.get("days")
+            if days is not None:
+                days = {d.lower().strip() for d in days}
+                invalid = days - VALID_DAYS
+                if invalid:
+                    log.error("[[user]] %s: invalid days: %s", name, invalid)
+                    sys.exit(1)
+            else:
+                days = set(VALID_DAYS)
+
+            kill = u.get("kill", True)
+            notify = u.get("notify", notifications["enabled"])
+
+            entries.append(
+                {
+                    "name": name,
+                    "lock_time": lock_time,
+                    "unlock_time": unlock_time,
+                    "days": days,
+                    "kill": kill,
+                    "notify": notify,
+                }
+            )
+
+    return {"users": entries, "notifications": notifications}
+
+
+# ---------------------------------------------------------------------------
+# Time logic
+# ---------------------------------------------------------------------------
+
+
+def in_lock_window(now: datetime.time, lock: datetime.time, unlock: datetime.time) -> bool:
+    """Return True if 'now' falls inside the lock window.
+
+    Handles windows that wrap past midnight (e.g. 23:00 -> 05:00).
+    """
+    if lock <= unlock:
+        return lock <= now < unlock
+    else:
+        return now >= lock or now < unlock
+
+
+def _minutes_until_lock(now: datetime.datetime, lock_time: datetime.time) -> int:
+    """Return how many minutes from *now* until *lock_time*.
+
+    Returns a negative value if lock_time has already passed today.
+    """
+    lock_dt = now.replace(hour=lock_time.hour, minute=lock_time.minute, second=0, microsecond=0)
+    return int((lock_dt - now).total_seconds() / 60)
+
+
+# ---------------------------------------------------------------------------
+# System interaction
+# ---------------------------------------------------------------------------
+
+
+def run(cmd: list[str], dry_run: bool = False) -> subprocess.CompletedProcess | None:
+    """Run a system command, or just log it in dry-run mode."""
+    if dry_run:
+        log.info("[dry-run] would run: %s", " ".join(cmd))
+        return None
+    log.debug("running: %s", " ".join(cmd))
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+
+def is_account_locked(username: str) -> bool:
+    """Check if an account is currently locked via passwd -S."""
+    result = subprocess.run(
+        ["passwd", "-S", username], capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        log.warning("passwd -S %s failed: %s", username, result.stderr.strip())
+        return False
+    fields = result.stdout.split()
+    return len(fields) >= 2 and fields[1] == "L"
+
+
+def user_exists(username: str) -> bool:
+    """Check if a system user exists."""
+    result = subprocess.run(["id", username], capture_output=True, text=True)
+    return result.returncode == 0
+
+
+def lock_account(username: str, kill: bool, dry_run: bool = False) -> None:
+    """Lock a user account and optionally terminate their sessions."""
+    log.info("locking account: %s", username)
+    run(["passwd", "--lock", username], dry_run)
+    if kill:
+        terminate_sessions(username, dry_run)
+
+
+def unlock_account(username: str, dry_run: bool = False) -> None:
+    """Unlock a user account."""
+    log.info("unlocking account: %s", username)
+    run(["passwd", "--unlock", username], dry_run)
+
+
+def terminate_sessions(username: str, dry_run: bool = False) -> None:
+    """Force-disconnect all active sessions for a user."""
+    result = subprocess.run(
+        ["loginctl", "list-sessions", "--no-legend"], capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        log.debug("loginctl list-sessions failed, trying pkill fallback")
+        run(["pkill", "-KILL", "-u", username], dry_run)
+        return
+
+    has_session = False
+    for line in result.stdout.strip().splitlines():
+        fields = line.split()
+        if len(fields) >= 3 and fields[2] == username:
+            has_session = True
+            break
+
+    if has_session:
+        log.info("terminating sessions for %s", username)
+        r = run(["loginctl", "terminate-user", username], dry_run)
+        if r and r.returncode != 0:
+            log.warning(
+                "loginctl terminate-user failed, falling back to pkill: %s",
+                r.stderr.strip(),
+            )
+            run(["pkill", "-KILL", "-u", username], dry_run)
+    else:
+        log.debug("no active sessions for %s", username)
+
+
+def send_notification(username: str, minutes_left: int, dry_run: bool = False) -> None:
+    """Send a desktop notification to the user."""
+    msg = f"Your account will be locked in {minutes_left} minute(s)."
+    cmd = [
+        "systemd-run",
+        f"--machine={username}@.host",
+        "--user",
+        "notify-send",
+        "Account Curfew",
+        msg,
+    ]
+    log.info("notifying %s: %d minutes until lock", username, minutes_left)
+    run(cmd, dry_run)
+
+
+# ---------------------------------------------------------------------------
+# Core enforcement
+# ---------------------------------------------------------------------------
+
+
+def enforce(entries: list[dict], notifications: dict, dry_run: bool = False) -> None:
+    """Check each user entry and lock/unlock as needed."""
+    now = datetime.datetime.now()
+    today = DAY_MAP[now.weekday()]
+    current_time = now.time()
+    notif_enabled = notifications.get("enabled", False)
+    notif_warnings = notifications.get("warnings", 3)
+    notif_interval = notifications.get("interval", 5)
+    warning_window = notif_warnings * notif_interval
+
+    for entry in entries:
+        username = entry["name"]
+
+        if not user_exists(username):
+            log.warning("user %s does not exist, skipping", username)
+            continue
+
+        if today not in entry["days"]:
+            if is_account_locked(username):
+                log.info("%s: not a scheduled day (%s), unlocking", username, today)
+                unlock_account(username, dry_run)
+            else:
+                log.debug("%s: not a scheduled day, already unlocked", username)
+            continue
+
+        should_lock = in_lock_window(current_time, entry["lock_time"], entry["unlock_time"])
+        currently_locked = is_account_locked(username)
+
+        if should_lock and not currently_locked:
+            lock_account(username, entry["kill"], dry_run)
+        elif not should_lock and currently_locked:
+            unlock_account(username, dry_run)
+        else:
+            state = "locked" if currently_locked else "unlocked"
+            log.debug("%s: already %s, no action needed", username, state)
+
+        if notif_enabled and entry.get("notify", False) and not should_lock and not currently_locked:
+            mins_left = _minutes_until_lock(now, entry["lock_time"])
+            if 0 < mins_left <= warning_window:
+                send_notification(username, mins_left, dry_run)
+
+
+# ---------------------------------------------------------------------------
+# Status display
+# ---------------------------------------------------------------------------
+
+
+def _cron_status(script_path: str) -> str:
+    script_abs = os.path.realpath(script_path)
+    result = subprocess.run(
+        ["crontab", "-l"], capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        return "not installed"
+
+    for line in result.stdout.splitlines():
+        if script_abs in line and not line.lstrip().startswith("#"):
+            return "installed"
+
+    return "not installed"
+
+
+def show_status(entries: list[dict], notifications: dict, script_path: str = "") -> None:
+    now = datetime.datetime.now()
+    today = DAY_MAP[now.weekday()]
+    current_time = now.time()
+    notif_enabled = notifications.get("enabled", False)
+    notif_warnings = notifications.get("warnings", 3)
+    notif_interval = notifications.get("interval", 5)
+
+    print(f"Current time: {now.strftime('%Y-%m-%d %H:%M:%S')} ({today})")
+    print()
+
+    for entry in entries:
+        username = entry["name"]
+        exists = user_exists(username)
+        locked = is_account_locked(username) if exists else None
+        scheduled_today = today in entry["days"]
+        should_lock = scheduled_today and in_lock_window(
+            current_time, entry["lock_time"], entry["unlock_time"]
+        )
+
+        status = "MISSING" if not exists else ("LOCKED" if locked else "unlocked")
+        expected = "should be locked" if should_lock else "should be unlocked"
+        days_str = ", ".join(sorted(entry["days"])) if entry["days"] != set(VALID_DAYS) else "every day"
+        kill_str = "yes" if entry["kill"] else "no"
+        notify_str = "yes" if entry.get("notify", False) else "no"
+
+        print(f"  {username}:")
+        print(f"    schedule   : lock {entry['lock_time'].strftime('%H:%M')} -> unlock {entry['unlock_time'].strftime('%H:%M')} ({days_str})")
+        print(f"    disconnect : {kill_str}")
+        print(f"    notify     : {notify_str}")
+        print(f"    current    : {status} ({expected})")
+        print()
+
+    if notif_enabled:
+        print(f"notifications: {notif_warnings} warning(s) every {notif_interval} min")
+
+    if script_path:
+        print(f"cron: {_cron_status(script_path)}")
+
+
+# ---------------------------------------------------------------------------
+# Cron installation
+# ---------------------------------------------------------------------------
+
+
+def install_cron(script_path: str, config_path: str, interval: int) -> None:
+    script_abs = os.path.realpath(script_path)
+    config_abs = os.path.realpath(config_path)
+    cron_line = f"*/{interval} * * * * /usr/bin/python3 {script_abs} --config {config_abs}\n"
+
+    result = subprocess.run(
+        ["crontab", "-l"], capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        existing = ""
+    else:
+        existing = result.stdout
+
+    for line in existing.splitlines():
+        if script_abs in line and not line.lstrip().startswith("#"):
+            print(f"cron entry already exists:\n  {line.strip()}")
+            print()
+
+            if line.strip() == cron_line.strip():
+                print("no changes needed.")
+                return
+
+            print(f"updating to:\n  {cron_line.strip()}")
+            new_crontab = ""
+            for l in existing.splitlines():
+                if script_abs in l and not l.lstrip().startswith("#"):
+                    new_crontab += cron_line
+                else:
+                    new_crontab += l + "\n"
+
+            proc = subprocess.run(
+                ["crontab", "-"], input=new_crontab, capture_output=True, text=True
+            )
+            if proc.returncode != 0:
+                print(f"error updating crontab: {proc.stderr.strip()}", file=sys.stderr)
+                sys.exit(1)
+            print("crontab updated.")
+            return
+
+    new_crontab = existing
+    if new_crontab and not new_crontab.endswith("\n"):
+        new_crontab += "\n"
+    new_crontab += cron_line
+
+    proc = subprocess.run(
+        ["crontab", "-"], input=new_crontab, capture_output=True, text=True
+    )
+    if proc.returncode != 0:
+        print(f"error installing crontab: {proc.stderr.strip()}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"crontab entry installed:\n  {cron_line.strip()}")
+    print(f"\nthe script will run every {interval} minute(s) as root.")
+
+
+# ---------------------------------------------------------------------------
+
+
+def uninstall_cron(script_path: str) -> None:
+    """Remove any root crontab entries referencing this script."""
+    script_abs = os.path.realpath(script_path)
+
+    result = subprocess.run(
+        ["crontab", "-l"], capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print("no crontab entries found.")
+        return
+
+    existing = result.stdout
+    new_lines = []
+    removed = 0
+    for line in existing.splitlines():
+        if script_abs in line and not line.lstrip().startswith("#"):
+            removed += 1
+        else:
+            new_lines.append(line)
+
+    if removed == 0:
+        print("no matching crontab entry found.")
+        return
+
+    new_crontab = "\n".join(new_lines) + "\n"
+
+    proc = subprocess.run(
+        ["crontab", "-"], input=new_crontab, capture_output=True, text=True
+    )
+    if proc.returncode != 0:
+        print(f"error updating crontab: {proc.stderr.strip()}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"removed {removed} crontab entry(s).")
+
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Lock/unlock user accounts on a time-based schedule.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="path to TOML config (default: user-curfew.toml next to this script)",
+    )
+    parser.add_argument(
+        "--install",
+        nargs="?",
+        const=5,
+        type=int,
+        metavar="MINUTES",
+        help="install root crontab entry (default interval: 5 minutes)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="show what would happen without making changes",
+    )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="show current lock state of configured users",
+    )
+    parser.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="remove root crontab entry",
+    )
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="verbose output",
+    )
+
+    args = parser.parse_args()
+
+    level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(format=LOG_FORMAT, level=level)
+
+    config_path = args.config or default_config_path()
+
+    if args.install is not None:
+        if os.geteuid() != 0:
+            log.error("--install must be run as root (use sudo)")
+            sys.exit(1)
+        install_cron(__file__, str(config_path), args.install)
+        return
+
+    if args.uninstall:
+        if os.geteuid() != 0:
+            log.error("--uninstall must be run as root (use sudo)")
+            sys.exit(1)
+        uninstall_cron(__file__)
+        return
+
+    cfg = load_config(config_path)
+
+    if args.status:
+        show_status(cfg["users"], cfg["notifications"], __file__)
+        return
+
+    if os.geteuid() != 0:
+        log.error("must be run as root (use sudo)")
+        sys.exit(1)
+
+    if not cfg["users"]:
+        return
+
+    enforce(cfg["users"], cfg["notifications"], dry_run=args.dry_run)
+
+
+if __name__ == "__main__":
+    main()
