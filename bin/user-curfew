@@ -10,7 +10,7 @@ Usage:
     user-curfew --install [SCHEDULER] # install systemd (default) or crontab
     user-curfew --uninstall           # remove systemd timer and crontab entry
     user-curfew --dry-run             # show what would happen without changing anything
-    user-curfew --status              # show current lock state of configured users
+    user-curfew --status              # show config and current lock state
 """
 
 from __future__ import annotations
@@ -360,7 +360,31 @@ def _cron_status(script_path: str) -> str:
     return "not installed"
 
 
-def show_status(entries: list[dict], notifications: dict, script_path: str = "") -> None:
+def _print_parsed_config(entries: list[dict], notifications: dict) -> None:
+    """Print the effective, parsed configuration without file comments."""
+    for entry in entries:
+        print("[[user]]")
+        print(f'name = "{entry["name"]}"')
+        print(f'lock_time = "{entry["lock_time"].strftime("%H:%M")}"')
+        print(f'unlock_time = "{entry["unlock_time"].strftime("%H:%M")}"')
+        days = ", ".join(f'"{day}"' for day in sorted(entry["days"]))
+        print(f"days = [{days}]")
+        print(f'kill = {str(entry["kill"]).lower()}')
+        print(f'notify = {str(entry.get("notify", False)).lower()}')
+        print()
+
+    print("[notifications]")
+    print(f'enabled = {str(notifications.get("enabled", False)).lower()}')
+    print(f'warnings = {notifications.get("warnings", 3)}')
+    print(f'interval = {notifications.get("interval", 5)}')
+
+
+def show_status(
+    entries: list[dict],
+    notifications: dict,
+    script_path: str = "",
+    config_path: str | Path | None = None,
+) -> None:
     now = datetime.datetime.now()
     today = DAY_MAP[now.weekday()]
     current_time = now.time()
@@ -370,6 +394,11 @@ def show_status(entries: list[dict], notifications: dict, script_path: str = "")
 
     print(f"Current time: {now.strftime('%Y-%m-%d %H:%M:%S')} ({today})")
     print()
+
+    if config_path is not None:
+        print(f"Config: {Path(config_path)}")
+        _print_parsed_config(entries, notifications)
+        print()
 
     for entry in entries:
         username = entry["name"]
@@ -615,7 +644,7 @@ def main() -> None:
     parser.add_argument(
         "--status",
         action="store_true",
-        help="show current lock state of configured users",
+        help="show config and current lock state of configured users",
     )
     parser.add_argument(
         "--uninstall",
@@ -703,7 +732,12 @@ def main() -> None:
     cfg = load_config(config_path)
 
     if args.status:
-        show_status(cfg["users"], cfg["notifications"], __file__)
+        show_status(
+            cfg["users"],
+            cfg["notifications"],
+            __file__,
+            config_path=config_path,
+        )
         return
 
     if os.geteuid() != 0:

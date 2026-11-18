@@ -144,6 +144,26 @@ def test_show_status_notifications_hidden_when_disabled(module, notif_disabled, 
     assert "notifications:" not in captured.out
 
 
+def test_show_status_includes_config_location_and_parsed_contents(
+    module, sample_entries, notif_disabled, capsys, tmp_path
+):
+    config = tmp_path / "user-curfew.toml"
+    config.write_text("# commented out information\n[[user]]\nname = \"ignored\"\n")
+
+    with freeze_time("2025-06-02 12:00:00"):
+        with patch.object(module, "user_exists", return_value=True), \
+             patch.object(module, "is_account_locked", return_value=False):
+            module.show_status(sample_entries, notif_disabled, config_path=config)
+
+    captured = capsys.readouterr()
+    assert f"Config: {config}" in captured.out
+    assert 'name = "alice"' in captured.out
+    assert 'name = "bob"' in captured.out
+    assert "[notifications]" in captured.out
+    assert "commented out information" not in captured.out
+    assert 'name = "ignored"' not in captured.out
+
+
 def test_show_status_includes_cron_when_installed(module, sample_entries, notif_disabled, capsys):
     with freeze_time("2025-06-02 12:00:00"):
         with patch.object(module, "user_exists", return_value=True), \

@@ -88,7 +88,7 @@ user-curfew --install [systemd|crontab] # install a scheduler (default: systemd)
 user-curfew --install 10               # legacy: install crontab, every 10 min
 user-curfew --uninstall [systemd|crontab|all] # remove scheduler(s), default: all
 user-curfew --dry-run                  # show what would happen without changing anything
-user-curfew --status                   # show current lock state of configured users
+user-curfew --status                   # show config and current lock state
 user-curfew --verbose                  # verbose output
 ```
 
