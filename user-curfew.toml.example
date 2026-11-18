@@ -8,6 +8,8 @@
 #                 defaults to every day if omitted
 #   kill        = force-disconnect active sessions at lock time (default: true)
 #   notify      = send desktop warnings before lock (default: follows [notifications].enabled)
+#   always_lock = keep the account locked regardless of time or day (default: false)
+#                 when true, lock_time, unlock_time, and days are not required
 #
 # The lock window wraps across midnight, so lock=23:00 unlock=05:00 works
 # as expected (locked from 11 PM until 5 AM).
@@ -29,3 +31,4 @@ unlock_time = "05:00"
 # days      = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 # kill      = true
 # notify    = true
+# always_lock = false

@@ -240,3 +240,52 @@ days = ["MON", "TUE", "Wed"]
         cfg.write_text("# no user entries\n")
         result = module.load_config(cfg)
         assert result["users"] == []
+
+    def test_always_lock_defaults_to_false(self, module, tmp_path):
+        cfg = tmp_path / "test.toml"
+        cfg.write_text("""\
+[[user]]
+name = "alice"
+lock_time = "22:00"
+unlock_time = "06:00"
+""")
+        result = module.load_config(cfg)
+        assert result["users"][0]["always_lock"] is False
+
+    def test_always_lock_without_schedule_times(self, module, tmp_path):
+        cfg = tmp_path / "test.toml"
+        cfg.write_text("""\
+[[user]]
+name = "alice"
+always_lock = true
+""")
+        result = module.load_config(cfg)
+        entry = result["users"][0]
+        assert entry["always_lock"] is True
+        assert entry["lock_time"] is None
+        assert entry["unlock_time"] is None
+
+    def test_always_lock_with_schedule_times(self, module, tmp_path):
+        cfg = tmp_path / "test.toml"
+        cfg.write_text("""\
+[[user]]
+name = "alice"
+lock_time = "22:00"
+unlock_time = "06:00"
+always_lock = true
+""")
+        result = module.load_config(cfg)
+        entry = result["users"][0]
+        assert entry["always_lock"] is True
+        assert entry["lock_time"] == datetime.time(22, 0)
+        assert entry["unlock_time"] == datetime.time(6, 0)
+
+    def test_always_locked_alias(self, module, tmp_path):
+        cfg = tmp_path / "test.toml"
+        cfg.write_text("""\
+[[user]]
+name = "alice"
+always_locked = true
+""")
+        result = module.load_config(cfg)
+        assert result["users"][0]["always_lock"] is True

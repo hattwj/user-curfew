@@ -141,9 +141,14 @@ def load_config(path: Path) -> dict:
                 log.error("[[user]] entry %d missing 'name'", i)
                 sys.exit(1)
 
+            always_lock = u.get("always_lock", u.get("always_locked", False))
             try:
-                lock_time = parse_time(u["lock_time"])
-                unlock_time = parse_time(u["unlock_time"])
+                if always_lock:
+                    lock_time = parse_time(u["lock_time"]) if "lock_time" in u else None
+                    unlock_time = parse_time(u["unlock_time"]) if "unlock_time" in u else None
+                else:
+                    lock_time = parse_time(u["lock_time"])
+                    unlock_time = parse_time(u["unlock_time"])
             except (KeyError, ValueError) as exc:
                 log.error("[[user]] %s: %s", name, exc)
                 sys.exit(1)
@@ -169,6 +174,7 @@ def load_config(path: Path) -> dict:
                     "days": days,
                     "kill": kill,
                     "notify": notify,
+                    "always_lock": always_lock,
                 }
             )
 
@@ -313,6 +319,14 @@ def enforce(entries: list[dict], notifications: dict, dry_run: bool = False) -> 
             log.warning("user %s does not exist, skipping", username)
             continue
 
+        if entry.get("always_lock", False):
+            if is_account_locked(username):
+                log.debug("%s: always locked, already locked", username)
+            else:
+                log.info("%s: always locked, locking account", username)
+                lock_account(username, entry["kill"], dry_run)
+            continue
+
         if today not in entry["days"]:
             if is_account_locked(username):
                 log.info("%s: not a scheduled day (%s), unlocking", username, today)
@@ -363,12 +377,15 @@ def _cron_status(script_path: str) -> str:
 def _print_parsed_config(entries: list[dict], notifications: dict) -> None:
     """Print the effective, parsed configuration without file comments."""
     for entry in entries:
+        always_lock = entry.get("always_lock", False)
         print("[[user]]")
         print(f'name = "{entry["name"]}"')
-        print(f'lock_time = "{entry["lock_time"].strftime("%H:%M")}"')
-        print(f'unlock_time = "{entry["unlock_time"].strftime("%H:%M")}"')
-        days = ", ".join(f'"{day}"' for day in sorted(entry["days"]))
-        print(f"days = [{days}]")
+        print(f"always_lock = {str(always_lock).lower()}")
+        if not always_lock:
+            print(f'lock_time = "{entry["lock_time"].strftime("%H:%M")}"')
+            print(f'unlock_time = "{entry["unlock_time"].strftime("%H:%M")}"')
+            days = ", ".join(f'"{day}"' for day in sorted(entry["days"]))
+            print(f"days = [{days}]")
         print(f'kill = {str(entry["kill"]).lower()}')
         print(f'notify = {str(entry.get("notify", False)).lower()}')
         print()
@@ -402,21 +419,33 @@ def show_status(
 
     for entry in entries:
         username = entry["name"]
+        always_lock = entry.get("always_lock", False)
         exists = user_exists(username)
         locked = is_account_locked(username) if exists else None
         scheduled_today = today in entry["days"]
-        should_lock = scheduled_today and in_lock_window(
-            current_time, entry["lock_time"], entry["unlock_time"]
+        should_lock = always_lock or (
+            scheduled_today
+            and in_lock_window(
+                current_time, entry["lock_time"], entry["unlock_time"]
+            )
         )
 
         status = "MISSING" if not exists else ("LOCKED" if locked else "unlocked")
         expected = "should be locked" if should_lock else "should be unlocked"
-        days_str = ", ".join(sorted(entry["days"])) if entry["days"] != set(VALID_DAYS) else "every day"
         kill_str = "yes" if entry["kill"] else "no"
         notify_str = "yes" if entry.get("notify", False) else "no"
 
+        if always_lock:
+            schedule_str = "always locked"
+        else:
+            days_str = ", ".join(sorted(entry["days"])) if entry["days"] != set(VALID_DAYS) else "every day"
+            schedule_str = (
+                f"lock {entry['lock_time'].strftime('%H:%M')} -> "
+                f"unlock {entry['unlock_time'].strftime('%H:%M')} ({days_str})"
+            )
+
         print(f"  {username}:")
-        print(f"    schedule   : lock {entry['lock_time'].strftime('%H:%M')} -> unlock {entry['unlock_time'].strftime('%H:%M')} ({days_str})")
+        print(f"    schedule   : {schedule_str}")
         print(f"    disconnect : {kill_str}")
         print(f"    notify     : {notify_str}")
         print(f"    current    : {status} ({expected})")

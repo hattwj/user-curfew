@@ -70,6 +70,8 @@ cp /opt/user-curfew/user-curfew.toml.example /etc/user-curfew.toml
 #   days        = optional list of weekday names (mon, tue, wed, thu, fri, sat, sun)
 #                 defaults to every day if omitted
 #   kill        = force-disconnect active sessions at lock time (default: true)
+#   always_lock = keep the account locked regardless of time or day (default: false)
+#                 when true, lock_time, unlock_time, and days are not required
 
 [[user]]
 name        = "alice"
@@ -77,6 +79,10 @@ lock_time   = "23:00"
 unlock_time = "05:00"
 days        = ["mon", "tue", "wed", "thu", "fri"]
 kill        = true
+
+[[user]]
+name        = "bob"
+always_lock = true
 ```
 
 ## Usage

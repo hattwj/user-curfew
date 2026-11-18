@@ -164,6 +164,30 @@ def test_show_status_includes_config_location_and_parsed_contents(
     assert 'name = "ignored"' not in captured.out
 
 
+def test_show_status_always_lock(module, notif_disabled, capsys, tmp_path):
+    entry = {
+        "name": "alice",
+        "lock_time": None,
+        "unlock_time": None,
+        "days": {"mon", "tue", "wed", "thu", "fri"},
+        "kill": True,
+        "notify": False,
+        "always_lock": True,
+    }
+    config = tmp_path / "user-curfew.toml"
+    config.write_text('[[user]]\nname = "alice"\nalways_lock = true\n')
+
+    with freeze_time("2025-06-02 12:00:00"):
+        with patch.object(module, "user_exists", return_value=True), \
+             patch.object(module, "is_account_locked", return_value=False):
+            module.show_status([entry], notif_disabled, config_path=config)
+
+    captured = capsys.readouterr()
+    assert "always_lock = true" in captured.out
+    assert "schedule   : always locked" in captured.out
+    assert "should be locked" in captured.out
+
+
 def test_show_status_includes_cron_when_installed(module, sample_entries, notif_disabled, capsys):
     with freeze_time("2025-06-02 12:00:00"):
         with patch.object(module, "user_exists", return_value=True), \

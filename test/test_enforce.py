@@ -145,6 +145,69 @@ def test_enforce_weekend_test(module, notif_disabled):
             mock_unlock.assert_called_once()
 
 
+def test_enforce_always_lock_outside_window(module, sample_entry, notif_disabled):
+    entry = dict(sample_entry)
+    entry["always_lock"] = True
+
+    with freeze_time("2025-06-02 12:00:00"):
+        with patch.object(module, "user_exists", return_value=True), \
+             patch.object(module, "is_account_locked", return_value=False), \
+             patch.object(module, "lock_account") as mock_lock, \
+             patch.object(module, "unlock_account") as mock_unlock:
+            module.enforce([entry], notif_disabled)
+            mock_lock.assert_called_once_with("testuser", True, False)
+            mock_unlock.assert_not_called()
+
+
+def test_enforce_always_lock_on_unscheduled_day(module, sample_entry, notif_disabled):
+    entry = dict(sample_entry)
+    entry["days"] = {"sat", "sun"}
+    entry["always_lock"] = True
+
+    with freeze_time("2025-06-02 12:00:00"):
+        with patch.object(module, "user_exists", return_value=True), \
+             patch.object(module, "is_account_locked", return_value=False), \
+             patch.object(module, "lock_account") as mock_lock, \
+             patch.object(module, "unlock_account") as mock_unlock:
+            module.enforce([entry], notif_disabled)
+            mock_lock.assert_called_once_with("testuser", True, False)
+            mock_unlock.assert_not_called()
+
+
+def test_enforce_always_lock_already_locked_no_action(module, sample_entry, notif_disabled):
+    entry = dict(sample_entry)
+    entry["always_lock"] = True
+
+    with freeze_time("2025-06-02 12:00:00"):
+        with patch.object(module, "user_exists", return_value=True), \
+             patch.object(module, "is_account_locked", return_value=True), \
+             patch.object(module, "lock_account") as mock_lock, \
+             patch.object(module, "unlock_account") as mock_unlock:
+            module.enforce([entry], notif_disabled)
+            mock_lock.assert_not_called()
+            mock_unlock.assert_not_called()
+
+
+def test_enforce_always_lock_does_not_send_notification(module, notif_enabled):
+    entry = {
+        "name": "alice",
+        "lock_time": None,
+        "unlock_time": None,
+        "days": {"mon", "tue", "wed", "thu", "fri"},
+        "kill": True,
+        "notify": True,
+        "always_lock": True,
+    }
+
+    with freeze_time("2025-06-02 22:50:00"):
+        with patch.object(module, "user_exists", return_value=True), \
+             patch.object(module, "is_account_locked", return_value=False), \
+             patch.object(module, "lock_account"), \
+             patch.object(module, "send_notification") as mock_notify:
+            module.enforce([entry], notif_enabled)
+            mock_notify.assert_not_called()
+
+
 def test_enforce_dry_run_passes_flag(module, sample_entry, notif_disabled):
     with freeze_time("2025-06-02 23:30:00"):
         with patch.object(module, "user_exists", return_value=True), \
