@@ -258,7 +258,7 @@ class TestUninstallCron:
 class TestDefaultConfigPath:
     def test_default_config_path(self, module):
         path = module.default_config_path()
-        assert path.name == "user-curfew.toml"
+        assert str(path) == "/etc/user-curfew.toml"
 
 
 class TestPathHandling:

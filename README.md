@@ -56,11 +56,16 @@ options. `sudo ./bin/user-curfew --uninstall` removes both schedulers.
 
 ## Configuration
 
-Copy the example config and edit it:
+The only runtime config is `/etc/user-curfew.toml`. Both installers create it
+from `user-curfew.toml.example` on first install, then use it for the systemd
+service or cron entry. Edit that file, not a copy inside the repo:
 
 ```bash
-cp /opt/user-curfew/user-curfew.toml.example /etc/user-curfew.toml
+sudo editor /etc/user-curfew.toml
 ```
+
+For a one-off run with a different file, pass `--config PATH`. The example
+file is the template:
 
 ```toml
 # Each [[user]] block defines a lock schedule for a system account.

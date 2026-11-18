@@ -104,6 +104,8 @@ if [[ ! -e "$CONFIG" ]]; then
     printf 'edit it before relying on the lock schedules.\n\n'
 fi
 
+printf 'using config: %s\n' "$CONFIG"
+
 cat >"$SERVICE_UNIT" <<EOF
 [Unit]
 Description=user-curfew account lock enforcement

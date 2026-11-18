@@ -2,7 +2,8 @@
 """user-curfew: lock/unlock user accounts on a time schedule.
 
 Intended to run as root every few minutes, via a systemd timer or cron.
-Configuration lives in a TOML file next to this script.
+Configuration lives in /etc/user-curfew.toml. The installers create it from
+user-curfew.toml.example if it does not already exist.
 
 Usage:
     user-curfew                       # enforce schedules from config
@@ -41,6 +42,7 @@ DAY_MAP = {
     5: "sat",
     6: "sun",
 }
+DAY_ORDER = list(DAY_MAP.values())
 
 DEFAULT_NOTIFICATIONS = {
     "enabled": False,
@@ -56,7 +58,12 @@ INSTALLERS = {
 
 
 def default_config_path() -> Path:
-    return Path(__file__).resolve().parent / "user-curfew.toml"
+    return Path("/etc/user-curfew.toml")
+
+
+def format_days(days: set[str]) -> str:
+    """Format weekdays in Monday-to-Sunday order."""
+    return ", ".join(day for day in DAY_ORDER if day in days)
 
 
 # /usr/local may be a symlink, for example /usr/local -> /var/usrlocal on
@@ -381,11 +388,12 @@ def _print_parsed_config(entries: list[dict], notifications: dict) -> None:
         print("[[user]]")
         print(f'name = "{entry["name"]}"')
         print(f"always_lock = {str(always_lock).lower()}")
-        if not always_lock:
+        if entry["lock_time"] is not None:
             print(f'lock_time = "{entry["lock_time"].strftime("%H:%M")}"')
+        if entry["unlock_time"] is not None:
             print(f'unlock_time = "{entry["unlock_time"].strftime("%H:%M")}"')
-            days = ", ".join(f'"{day}"' for day in sorted(entry["days"]))
-            print(f"days = [{days}]")
+        days = ", ".join(f'"{day}"' for day in DAY_ORDER if day in entry["days"])
+        print(f"days = [{days}]")
         print(f'kill = {str(entry["kill"]).lower()}')
         print(f'notify = {str(entry.get("notify", False)).lower()}')
         print()
@@ -438,7 +446,7 @@ def show_status(
         if always_lock:
             schedule_str = "always locked"
         else:
-            days_str = ", ".join(sorted(entry["days"])) if entry["days"] != set(VALID_DAYS) else "every day"
+            days_str = format_days(entry["days"]) if entry["days"] != set(VALID_DAYS) else "every day"
             schedule_str = (
                 f"lock {entry['lock_time'].strftime('%H:%M')} -> "
                 f"unlock {entry['unlock_time'].strftime('%H:%M')} ({days_str})"
@@ -629,7 +637,7 @@ def main() -> None:
         "--config",
         type=Path,
         default=None,
-        help="path to TOML config (default: user-curfew.toml next to this script)",
+        help="path to TOML config (default: /etc/user-curfew.toml)",
     )
     parser.add_argument(
         "-i",

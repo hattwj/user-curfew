@@ -94,4 +94,5 @@ if [[ ! -e "$CONFIG" ]]; then
     printf 'edit it before relying on the lock schedules.\n\n'
 fi
 
+printf 'using config: %s\n' "$CONFIG"
 exec "$PYTHON" "$USER_CURFEW" --config "$CONFIG" --install-crontab "$INTERVAL"

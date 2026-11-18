@@ -66,7 +66,11 @@ def test_show_status_partial_week_label(module, notif_disabled, capsys):
             module.show_status([entry], notif_disabled)
 
     captured = capsys.readouterr()
-    assert "fri, mon, thu, tue, wed" in captured.out
+    assert "mon, tue, wed, thu, fri" in captured.out
+
+
+def test_format_days_uses_week_order(module):
+    assert module.format_days({"fri", "mon", "sun", "wed"}) == "mon, wed, fri, sun"
 
 
 def test_show_status_kill_yes(module, notif_disabled, capsys):
@@ -159,6 +163,7 @@ def test_show_status_includes_config_location_and_parsed_contents(
     assert f"Config: {config}" in captured.out
     assert 'name = "alice"' in captured.out
     assert 'name = "bob"' in captured.out
+    assert 'days = ["mon", "tue", "wed", "thu", "fri"]' in captured.out
     assert "[notifications]" in captured.out
     assert "commented out information" not in captured.out
     assert 'name = "ignored"' not in captured.out
