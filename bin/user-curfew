@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """user-curfew: lock/unlock user accounts on a time schedule.
 
-Intended to run as root via cron every few minutes.
+Intended to run as root every few minutes, via a systemd timer or cron.
 Configuration lives in a TOML file next to this script.
 
 Usage:
-    user-curfew                  # enforce schedules from config
-    user-curfew --config PATH    # use a specific config file
-    user-curfew --install [MIN]  # add root crontab entry (default: every 5 min)
-    user-curfew --dry-run        # show what would happen without changing anything
-    user-curfew --status         # show current lock state of configured users
+    user-curfew                       # enforce schedules from config
+    user-curfew --config PATH         # use a specific config file
+    user-curfew --install [SCHEDULER] # install systemd (default) or crontab
+    user-curfew --uninstall           # remove systemd timer and crontab entry
+    user-curfew --dry-run             # show what would happen without changing anything
+    user-curfew --status              # show current lock state of configured users
 """
 
 from __future__ import annotations
@@ -47,9 +48,57 @@ DEFAULT_NOTIFICATIONS = {
     "interval": 5,
 }
 
+# Scheduler installers live next to this script.
+INSTALLERS = {
+    "systemd": "install-systemd.sh",
+    "crontab": "install-crontab.sh",
+}
+
 
 def default_config_path() -> Path:
     return Path(__file__).resolve().parent / "user-curfew.toml"
+
+
+# /usr/local may be a symlink, for example /usr/local -> /var/usrlocal on
+# bootc-based images. Track both spellings so installs and status checks work
+# across traditional distros and image-based systems.
+_USR_LOCAL = "/usr/local"
+_USR_LOCAL_REAL = os.path.realpath(_USR_LOCAL)
+
+
+def _path_variants(path: str | Path) -> set[str]:
+    """Return equivalent spellings of *path* for matching crontab entries."""
+    path = os.fspath(path)
+    variants = {os.path.abspath(path), os.path.realpath(path)}
+    for source, alias in ((_USR_LOCAL_REAL, _USR_LOCAL), (_USR_LOCAL, _USR_LOCAL_REAL)):
+        if source == alias:
+            continue
+        for candidate in tuple(variants):
+            if candidate == source or candidate.startswith(source + os.sep):
+                variants.add(alias + candidate[len(source):])
+    return variants
+
+
+def _canonical_script_path(path: str | Path) -> str:
+    """Return the preferred absolute path to the script.
+
+    Prefer the /usr/local spelling when it maps to the same location so cron
+    entries remain readable and portable across image-based systems.
+    """
+    path = os.path.abspath(os.fspath(path))
+    if _USR_LOCAL_REAL != _USR_LOCAL:
+        if path == _USR_LOCAL or path.startswith(_USR_LOCAL + os.sep):
+            return path
+        if path == _USR_LOCAL_REAL or path.startswith(_USR_LOCAL_REAL + os.sep):
+            return _USR_LOCAL + path[len(_USR_LOCAL_REAL):]
+    return os.path.realpath(path)
+
+
+def _cron_line_matches(line: str, script_path: str | Path) -> bool:
+    """Return True if a non-comment crontab line references *script_path*."""
+    if line.lstrip().startswith("#"):
+        return False
+    return any(variant in line for variant in _path_variants(script_path))
 
 
 def parse_time(value: str) -> datetime.time:
@@ -295,15 +344,17 @@ def enforce(entries: list[dict], notifications: dict, dry_run: bool = False) -> 
 
 
 def _cron_status(script_path: str) -> str:
-    script_abs = os.path.realpath(script_path)
-    result = subprocess.run(
-        ["crontab", "-l"], capture_output=True, text=True
-    )
+    try:
+        result = subprocess.run(
+            ["crontab", "-l"], capture_output=True, text=True
+        )
+    except FileNotFoundError:
+        return "not installed"
     if result.returncode != 0:
         return "not installed"
 
     for line in result.stdout.splitlines():
-        if script_abs in line and not line.lstrip().startswith("#"):
+        if _cron_line_matches(line, script_path):
             return "installed"
 
     return "not installed"
@@ -350,12 +401,72 @@ def show_status(entries: list[dict], notifications: dict, script_path: str = "")
 
 
 # ---------------------------------------------------------------------------
-# Cron installation
+# Installer dispatch
+# ---------------------------------------------------------------------------
+
+
+def normalize_installer(value: str) -> str:
+    """Map a user-supplied scheduler name to an installer key."""
+    value = value.strip().lower()
+    if value in {"systemd", "timer", "systemd-timer"}:
+        return "systemd"
+    if value in {"cron", "crontab"}:
+        return "crontab"
+    raise ValueError(f"unknown scheduler {value!r}, expected 'systemd' or 'crontab'")
+
+
+def installer_path(name: str) -> Path:
+    return Path(__file__).resolve().parent / INSTALLERS[name]
+
+
+def run_installer(
+    name: str,
+    config_path: str | None = None,
+    interval: int | None = None,
+    uninstall: bool = False,
+) -> None:
+    """Run one of the shell installers next to this script."""
+    script = installer_path(name)
+    builtin_cron = (
+        name == "crontab"
+        and os.environ.get("USER_CURFEW_BUILTIN_CRON") == "1"
+    )
+    if builtin_cron or not script.is_file():
+        if name == "crontab":
+            if not builtin_cron:
+                log.warning("installer not found: %s, using built-in cron support", script)
+            if uninstall:
+                uninstall_cron(__file__)
+            else:
+                install_cron(
+                    __file__,
+                    config_path or str(default_config_path()),
+                    interval or 5,
+                )
+            return
+        log.error("installer not found: %s", script)
+        sys.exit(1)
+
+    cmd = [str(script)]
+    if interval is not None:
+        cmd.extend(["-i", str(interval)])
+    if config_path is not None:
+        cmd.extend(["-c", config_path])
+    if uninstall:
+        cmd.append("-u")
+
+    proc = subprocess.run(cmd)
+    if proc.returncode != 0:
+        sys.exit(proc.returncode)
+
+
+# ---------------------------------------------------------------------------
+# Legacy cron installation (fallback if install-crontab.sh is unavailable)
 # ---------------------------------------------------------------------------
 
 
 def install_cron(script_path: str, config_path: str, interval: int) -> None:
-    script_abs = os.path.realpath(script_path)
+    script_abs = _canonical_script_path(script_path)
     config_abs = os.path.realpath(config_path)
     cron_line = f"*/{interval} * * * * /usr/bin/python3 {script_abs} --config {config_abs}\n"
 
@@ -368,7 +479,7 @@ def install_cron(script_path: str, config_path: str, interval: int) -> None:
         existing = result.stdout
 
     for line in existing.splitlines():
-        if script_abs in line and not line.lstrip().startswith("#"):
+        if _cron_line_matches(line, script_path):
             print(f"cron entry already exists:\n  {line.strip()}")
             print()
 
@@ -379,7 +490,7 @@ def install_cron(script_path: str, config_path: str, interval: int) -> None:
             print(f"updating to:\n  {cron_line.strip()}")
             new_crontab = ""
             for l in existing.splitlines():
-                if script_abs in l and not l.lstrip().startswith("#"):
+                if _cron_line_matches(l, script_path):
                     new_crontab += cron_line
                 else:
                     new_crontab += l + "\n"
@@ -414,8 +525,6 @@ def install_cron(script_path: str, config_path: str, interval: int) -> None:
 
 def uninstall_cron(script_path: str) -> None:
     """Remove any root crontab entries referencing this script."""
-    script_abs = os.path.realpath(script_path)
-
     result = subprocess.run(
         ["crontab", "-l"], capture_output=True, text=True
     )
@@ -427,7 +536,7 @@ def uninstall_cron(script_path: str) -> None:
     new_lines = []
     removed = 0
     for line in existing.splitlines():
-        if script_abs in line and not line.lstrip().startswith("#"):
+        if _cron_line_matches(line, script_path):
             removed += 1
         else:
             new_lines.append(line)
@@ -452,6 +561,7 @@ def uninstall_cron(script_path: str) -> None:
 
 
 def main() -> None:
+    _UNSET = object()
     parser = argparse.ArgumentParser(
         description="Lock/unlock user accounts on a time-based schedule.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -464,12 +574,38 @@ def main() -> None:
         help="path to TOML config (default: user-curfew.toml next to this script)",
     )
     parser.add_argument(
+        "-i",
+        "--interval",
+        type=int,
+        default=None,
+        metavar="MINUTES",
+        help="run every MINUTES minutes when installing (default: 5)",
+    )
+    parser.add_argument(
         "--install",
         nargs="?",
-        const=5,
+        const="systemd",
+        metavar="SCHEDULER",
+        help="install a scheduler: systemd (default) or crontab; "
+        "a number is treated as a legacy crontab interval",
+    )
+    parser.add_argument(
+        "--install-systemd",
+        nargs="?",
+        const=None,
+        default=_UNSET,
         type=int,
         metavar="MINUTES",
-        help="install root crontab entry (default interval: 5 minutes)",
+        help="install the systemd timer (default interval: 5 minutes)",
+    )
+    parser.add_argument(
+        "--install-crontab",
+        nargs="?",
+        const=None,
+        default=_UNSET,
+        type=int,
+        metavar="MINUTES",
+        help="install the root crontab entry (default interval: 5 minutes)",
     )
     parser.add_argument(
         "--dry-run",
@@ -483,8 +619,20 @@ def main() -> None:
     )
     parser.add_argument(
         "--uninstall",
+        nargs="?",
+        const="all",
+        metavar="SCHEDULER",
+        help="remove a scheduler: systemd, crontab, or all (default: all)",
+    )
+    parser.add_argument(
+        "--uninstall-systemd",
         action="store_true",
-        help="remove root crontab entry",
+        help="remove the systemd service and timer",
+    )
+    parser.add_argument(
+        "--uninstall-crontab",
+        action="store_true",
+        help="remove the root crontab entry",
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -497,21 +645,60 @@ def main() -> None:
     level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(format=LOG_FORMAT, level=level)
 
-    config_path = args.config or default_config_path()
-
+    installs: list[tuple[str, int | None]] = []
     if args.install is not None:
+        value = args.install.strip()
+        if value.isdigit():
+            installs.append(("crontab", int(value)))
+        else:
+            try:
+                installs.append((normalize_installer(value), args.interval))
+            except ValueError as exc:
+                parser.error(str(exc))
+
+    if args.install_systemd is not _UNSET:
+        interval = args.interval if args.install_systemd is None else args.install_systemd
+        installs.append(("systemd", interval))
+
+    if args.install_crontab is not _UNSET:
+        interval = args.interval if args.install_crontab is None else args.install_crontab
+        installs.append(("crontab", interval))
+
+    uninstalls: list[str] = []
+    if args.uninstall is not None:
+        value = args.uninstall.strip()
+        if value.isdigit():
+            uninstalls.append("crontab")
+        elif value.lower() == "all":
+            uninstalls.extend(["systemd", "crontab"])
+        else:
+            try:
+                uninstalls.append(normalize_installer(value))
+            except ValueError as exc:
+                parser.error(str(exc))
+
+    if args.uninstall_systemd:
+        uninstalls.append("systemd")
+    if args.uninstall_crontab:
+        uninstalls.append("crontab")
+
+    if installs or uninstalls:
         if os.geteuid() != 0:
-            log.error("--install must be run as root (use sudo)")
+            log.error("installation must be run as root (use sudo)")
             sys.exit(1)
-        install_cron(__file__, str(config_path), args.install)
+
+        config_arg = str(args.config) if args.config else None
+        for name, interval in installs:
+            if interval is not None and not 1 <= interval <= 59:
+                log.error("interval must be between 1 and 59 minutes")
+                sys.exit(1)
+            run_installer(name, config_arg, interval)
+
+        for name in dict.fromkeys(uninstalls):
+            run_installer(name, config_arg, uninstall=True)
         return
 
-    if args.uninstall:
-        if os.geteuid() != 0:
-            log.error("--uninstall must be run as root (use sudo)")
-            sys.exit(1)
-        uninstall_cron(__file__)
-        return
+    config_path = args.config or default_config_path()
 
     cfg = load_config(config_path)
 

@@ -192,6 +192,11 @@ def test_cron_status_no_crontab(module):
         assert module._cron_status("/usr/local/bin/user-curfew") == "not installed"
 
 
+def test_cron_status_no_crontab_command(module):
+    with patch("subprocess.run", side_effect=FileNotFoundError):
+        assert module._cron_status("/usr/local/bin/user-curfew") == "not installed"
+
+
 def test_cron_status_skips_commented(module):
     proc = MagicMock()
     proc.returncode = 0

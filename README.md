@@ -2,7 +2,7 @@
   <img height="300" src="assets/logo.png">
 </p>
 
-Lock/unlock Linux user accounts on a time-based schedule. Intended to run as root via cron every few minutes.
+Lock/unlock Linux user accounts on a time-based schedule. Intended to run as root every few minutes, via either a systemd timer or cron.
 
 ## How it works
 
@@ -16,22 +16,50 @@ Lock windows can wrap across midnight (`lock_time=23:00`, `unlock_time=05:00`), 
 
 - Python 3.11+
 - Linux with `passwd`, `loginctl`, and `pkill` available
+- systemd (recommended, especially on image-based distributions such as
+  bootc) or cron if using the crontab installer
 - Must be run as root
 
 ## Installation
 
 ```bash
 git clone https://github.com/hattwj/user-curfew.git /opt/user-curfew
-sudo /opt/user-curfew/bin/user-curfew --install        # install crontab (every 5 minutes)
-sudo /opt/user-curfew/bin/user-curfew --install 10     # install crontab (every 10 minutes)
+cd /opt/user-curfew
 ```
+
+Choose either a systemd timer or a cron entry. Both installers live in
+`bin/` and create `/etc/user-curfew.toml` from the example config if it does
+not already exist. The systemd timer works on both traditional distributions
+such as Ubuntu and image-based distributions such as bootc; the crontab
+installer requires cron to be installed. Symlinked layouts such as
+`/usr/local -> /var/usrlocal` are handled.
+
+### systemd (recommended)
+
+```bash
+sudo ./bin/user-curfew --install systemd        # run every 5 minutes
+sudo ./bin/user-curfew --install systemd -i 10  # run every 10 minutes
+sudo ./bin/user-curfew --uninstall systemd      # uninstall the service and timer
+```
+
+### crontab
+
+```bash
+sudo ./bin/user-curfew --install crontab        # run every 5 minutes
+sudo ./bin/user-curfew --install crontab -i 10  # run every 10 minutes
+sudo ./bin/user-curfew --uninstall crontab      # uninstall the crontab entry
+```
+
+The installers can also be run directly (`./bin/install-systemd.sh` and
+`./bin/install-crontab.sh`); they accept the same `--interval` and `--config`
+options. `sudo ./bin/user-curfew --uninstall` removes both schedulers.
 
 ## Configuration
 
 Copy the example config and edit it:
 
 ```bash
-cp /opt/user-curfew/user-curfew.toml /etc/user-curfew.toml
+cp /opt/user-curfew/user-curfew.toml.example /etc/user-curfew.toml
 ```
 
 ```toml
@@ -54,12 +82,14 @@ kill        = true
 ## Usage
 
 ```
-user-curfew                  # enforce schedules from config
-user-curfew --config PATH    # use a specific config file
-user-curfew --install [MIN]  # add root crontab entry (default: every 5 min)
-user-curfew --dry-run        # show what would happen without changing anything
-user-curfew --status         # show current lock state of configured users
-user-curfew --verbose        # verbose output
+user-curfew                            # enforce schedules from config
+user-curfew --config PATH              # use a specific config file
+user-curfew --install [systemd|crontab] # install a scheduler (default: systemd)
+user-curfew --install 10               # legacy: install crontab, every 10 min
+user-curfew --uninstall [systemd|crontab|all] # remove scheduler(s), default: all
+user-curfew --dry-run                  # show what would happen without changing anything
+user-curfew --status                   # show current lock state of configured users
+user-curfew --verbose                  # verbose output
 ```
 
 ## Running tests

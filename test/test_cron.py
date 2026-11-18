@@ -259,3 +259,21 @@ class TestDefaultConfigPath:
     def test_default_config_path(self, module):
         path = module.default_config_path()
         assert path.name == "user-curfew.toml"
+
+
+class TestPathHandling:
+    def test_canonical_path_prefers_usr_local(self, module):
+        path = "/usr/local/bin/user-curfew"
+        assert module._canonical_script_path(path) == path
+        assert module._canonical_script_path(os.path.realpath(path)) == path
+
+    def test_path_variants_include_usr_local_aliases(self, module):
+        path = "/usr/local/bin/user-curfew"
+        variants = module._path_variants(path)
+        assert path in variants
+        assert os.path.realpath(path) in variants
+
+    def test_cron_line_matches_symlinked_usr_local(self, module):
+        path = "/usr/local/bin/user-curfew"
+        line = f"*/5 * * * * /usr/bin/python3 {path} --config /etc/user-curfew.toml"
+        assert module._cron_line_matches(line, os.path.realpath(path))
